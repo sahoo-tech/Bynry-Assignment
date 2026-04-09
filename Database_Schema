@@ -1,0 +1,177 @@
+CREATE TABLE companies (
+    id               SERIAL          PRIMARY KEY,
+    name             VARCHAR(255)    NOT NULL,
+    legal_name       VARCHAR(255),
+    tax_id           VARCHAR(100)    UNIQUE,
+    address_line1    VARCHAR(255),
+    address_line2    VARCHAR(255),
+    city             VARCHAR(100),
+    state            VARCHAR(100),
+    country          VARCHAR(100)    NOT NULL DEFAULT 'US',
+    postal_code      VARCHAR(20),
+    email            VARCHAR(255),
+    phone            VARCHAR(50),
+    is_active        BOOLEAN         NOT NULL DEFAULT TRUE,
+    created_at       TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE warehouses (
+    id               SERIAL          PRIMARY KEY,
+    company_id       INT             NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+    name             VARCHAR(255)    NOT NULL,
+    code             VARCHAR(50)     NOT NULL,
+    address_line1    VARCHAR(255),
+    city             VARCHAR(100),
+    state            VARCHAR(100),
+    country          VARCHAR(100)    NOT NULL DEFAULT 'US',
+    postal_code      VARCHAR(20),
+    max_capacity     NUMERIC(15, 2),
+    is_active        BOOLEAN         NOT NULL DEFAULT TRUE,
+    created_at       TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_warehouse_code_per_company UNIQUE (company_id, code)
+);
+
+CREATE INDEX idx_warehouses_company ON warehouses(company_id);
+
+CREATE TABLE suppliers (
+    id               SERIAL          PRIMARY KEY,
+    name             VARCHAR(255)    NOT NULL,
+    contact_name     VARCHAR(255),
+    email            VARCHAR(255),
+    phone            VARCHAR(50),
+    address_line1    VARCHAR(255),
+    city             VARCHAR(100),
+    country          VARCHAR(100),
+    payment_terms    VARCHAR(100),
+    is_active        BOOLEAN         NOT NULL DEFAULT TRUE,
+    created_at       TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE company_suppliers (
+    id               SERIAL          PRIMARY KEY,
+    company_id       INT             NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    supplier_id      INT             NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE,
+    account_number   VARCHAR(100),
+    is_preferred     BOOLEAN         NOT NULL DEFAULT FALSE,
+    contracted_since DATE,
+    created_at       TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_company_supplier UNIQUE (company_id, supplier_id)
+);
+
+CREATE INDEX idx_company_suppliers_company   ON company_suppliers(company_id);
+CREATE INDEX idx_company_suppliers_supplier  ON company_suppliers(supplier_id);
+
+CREATE TABLE products (
+    id               SERIAL          PRIMARY KEY,
+    sku              VARCHAR(100)    NOT NULL UNIQUE,
+    name             VARCHAR(255)    NOT NULL,
+    description      TEXT,
+    unit_of_measure  VARCHAR(50)     NOT NULL DEFAULT 'each',
+    weight_kg        NUMERIC(10, 4),
+    dimensions_cm    JSONB,
+    category         VARCHAR(100),
+    is_bundle        BOOLEAN         NOT NULL DEFAULT FALSE,
+    is_active        BOOLEAN         NOT NULL DEFAULT TRUE,
+    created_at       TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_products_sku       ON products(sku);
+CREATE INDEX idx_products_is_bundle ON products(is_bundle) WHERE is_bundle = TRUE;
+CREATE INDEX idx_products_category  ON products(category);
+
+CREATE TABLE product_bundles (
+    id               SERIAL          PRIMARY KEY,
+    parent_product_id INT            NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    child_product_id  INT            NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+    quantity          NUMERIC(10, 4) NOT NULL CHECK (quantity > 0),
+    created_at        TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_bundle_component UNIQUE (parent_product_id, child_product_id),
+    CONSTRAINT chk_no_self_bundle   CHECK  (parent_product_id <> child_product_id)
+);
+
+CREATE INDEX idx_product_bundles_parent ON product_bundles(parent_product_id);
+CREATE INDEX idx_product_bundles_child  ON product_bundles(child_product_id);
+
+CREATE TABLE supplier_products (
+    id                  SERIAL          PRIMARY KEY,
+    supplier_id         INT             NOT NULL REFERENCES suppliers(id) ON DELETE CASCADE,
+    product_id          INT             NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    supplier_sku        VARCHAR(100),
+    unit_cost           NUMERIC(12, 4)  NOT NULL CHECK (unit_cost >= 0),
+    currency            CHAR(3)         NOT NULL DEFAULT 'USD',
+    lead_time_days      INT             CHECK (lead_time_days >= 0),
+    minimum_order_qty   NUMERIC(10, 4)  CHECK (minimum_order_qty > 0),
+    is_preferred        BOOLEAN         NOT NULL DEFAULT FALSE,
+    effective_from      DATE            NOT NULL DEFAULT CURRENT_DATE,
+    effective_to        DATE,
+    created_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_supplier_product_period UNIQUE (supplier_id, product_id, effective_from),
+    CONSTRAINT chk_effective_dates CHECK (effective_to IS NULL OR effective_to > effective_from)
+);
+
+CREATE INDEX idx_supplier_products_supplier ON supplier_products(supplier_id);
+CREATE INDEX idx_supplier_products_product  ON supplier_products(product_id);
+
+CREATE TABLE warehouse_inventory (
+    id                  SERIAL          PRIMARY KEY,
+    warehouse_id        INT             NOT NULL REFERENCES warehouses(id) ON DELETE RESTRICT,
+    product_id          INT             NOT NULL REFERENCES products(id)   ON DELETE RESTRICT,
+    quantity_on_hand    NUMERIC(15, 4)  NOT NULL DEFAULT 0 CHECK (quantity_on_hand >= 0),
+    quantity_reserved   NUMERIC(15, 4)  NOT NULL DEFAULT 0 CHECK (quantity_reserved >= 0),
+    reorder_point       NUMERIC(15, 4),
+    reorder_quantity    NUMERIC(15, 4),
+    last_counted_at     TIMESTAMPTZ,
+    updated_at          TIMESTAMPTZ       NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_warehouse_product UNIQUE (warehouse_id, product_id),
+    CONSTRAINT chk_reserved_lte_onhand CHECK (quantity_reserved <= quantity_on_hand)
+);
+
+CREATE INDEX idx_wh_inventory_warehouse ON warehouse_inventory(warehouse_id);
+CREATE INDEX idx_wh_inventory_product   ON warehouse_inventory(product_id);
+CREATE INDEX idx_wh_inventory_reorder   ON warehouse_inventory(quantity_on_hand)
+    WHERE reorder_point IS NOT NULL;
+
+CREATE TYPE txn_type AS ENUM (
+    'RECEIPT',
+    'SALE',
+    'TRANSFER_IN',
+    'TRANSFER_OUT',
+    'ADJUSTMENT_UP',
+    'ADJUSTMENT_DOWN',
+    'RETURN',
+    'DAMAGE',
+    'BUNDLE_ASSEMBLE',
+    'BUNDLE_DISASSEMBLE'
+);
+
+CREATE TABLE inventory_transactions (
+    id                  BIGSERIAL       PRIMARY KEY,
+    warehouse_id        INT             NOT NULL REFERENCES warehouses(id) ON DELETE RESTRICT,
+    product_id          INT             NOT NULL REFERENCES products(id)   ON DELETE RESTRICT,
+    txn_type            txn_type        NOT NULL,
+    quantity_delta      NUMERIC(15, 4)  NOT NULL,
+    quantity_before     NUMERIC(15, 4)  NOT NULL,
+    quantity_after      NUMERIC(15, 4)  NOT NULL,
+    unit_cost           NUMERIC(12, 4),
+    reference_type      VARCHAR(50),
+    reference_id        INT,
+    notes               TEXT,
+    performed_by        INT,
+    performed_at        TIMESTAMPTZ    NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_inv_txn_warehouse_product ON inventory_transactions(warehouse_id, product_id);
+CREATE INDEX idx_inv_txn_performed_at      ON inventory_transactions(performed_at DESC);
+CREATE INDEX idx_inv_txn_reference         ON inventory_transactions(reference_type, reference_id)
+    WHERE reference_id IS NOT NULL;
+CREATE INDEX idx_inv_txn_type              ON inventory_transactions(txn_type);
